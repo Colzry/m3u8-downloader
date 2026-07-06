@@ -5,12 +5,21 @@ import { useSettingStore } from "@/store/SettingStore.js";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import { appLogDir } from "@tauri-apps/api/path";
-import { HelpCircleOutline } from "@vicons/ionicons5";
-import { ref } from "vue";
+import {
+    HelpCircleOutline,
+    CloudDownloadOutline,
+    CheckmarkCircleOutline,
+    CloseCircleOutline,
+    DownloadOutline,
+    RefreshOutline,
+} from "@vicons/ionicons5";
+import { ref, computed } from "vue";
+import { marked } from "marked";
 
 // 引入官方的 updater 和 process 插件 API
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { createMockUpdate } from "@/utils/mockUpdate.js";
 
 const version = import.meta.env.VITE_APP_VERSION;
 const settingStore = useSettingStore();
@@ -44,55 +53,98 @@ const openAppLogDirectory = async () => {
     }
 };
 
+// 从 GitHub API 获取指定版本的发布信息
+const fetchReleaseInfo = async (ver) => {
+    try {
+        const resp = await fetch(
+            `https://api.github.com/repos/Colzry/m3u8-downloader/releases/tags/v${ver}`,
+        );
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return {
+            body: data.body || "",
+            date: data.published_at ? data.published_at.split("T")[0] : "",
+        };
+    } catch {
+        return null;
+    }
+};
+
 const updateModalVisible = ref(false);
 const updateProgress = ref(0);
-const updateMessage = ref("");
-// 增加 "confirm" 状态
-const updateModalStatus = ref("checking"); // "checking" | "confirm" | "downloading" | "success" | "failed" | "latest"
+const updateModalStatus = ref("idle"); // "idle" | "checking" | "confirm" | "downloading" | "ready" | "failed" | "latest"
 
 // 用于保存检查到的更新对象
 const currentUpdate = ref(null);
+// 当前版本的发布信息（latest 状态下展示）
+const currentVersionInfo = ref(null);
+// 用于取消下载
+const downloadCancelled = ref(false);
+// 用于取消检查更新
+let checkAbortController = null;
 
-// 点击按钮触发检查更新
-const onCheckUpdateClick = async () => {
+// Markdown 渲染
+const renderedConfirmBody = computed(() => {
+    const body = currentUpdate.value?.body;
+    return body ? marked.parse(body) : "";
+});
+const renderedLatestBody = computed(() => {
+    const body = currentVersionInfo.value?.body;
+    return body ? marked.parse(body) : "";
+});
+
+// 点击按钮触发检查更新，Ctrl+点击可触发模拟更新（开发环境测试）
+const onCheckUpdateClick = async (event) => {
     updateModalVisible.value = true;
     updateProgress.value = 0;
-    updateMessage.value = "正在检查更新...";
     updateModalStatus.value = "checking";
     currentUpdate.value = null;
+    currentVersionInfo.value = null;
+
+    // 创建新的 AbortController
+    checkAbortController = new AbortController();
+    const signal = checkAbortController.signal;
 
     try {
-        // 使用 Tauri 官方前端 API 检查更新
-        const update = await check();
+        // Ctrl+点击：使用模拟更新（仅开发环境）
+        const update =
+            import.meta.env.DEV && event.ctrlKey
+                ? createMockUpdate()
+                : await check();
+
+        // 检查是否已取消
+        if (signal.aborted) return;
 
         if (update) {
             // 发现更新，进入等待用户确认状态
             currentUpdate.value = update;
-            updateMessage.value = `发现新版本 v${update.version}，是否立即更新？`;
             updateModalStatus.value = "confirm";
         } else {
-            // 没有更新
-            updateMessage.value = "当前已是最新版本";
+            // 没有更新，获取当前版本的发布信息
+            currentVersionInfo.value = await fetchReleaseInfo(version);
+            // 再次检查是否已取消
+            if (signal.aborted) return;
             updateModalStatus.value = "latest";
-            setTimeout(() => {
-                updateModalVisible.value = false;
-            }, 3000);
         }
     } catch (e) {
-        updateMessage.value = "检查更新失败：" + e;
+        if (signal.aborted) return;
+        currentVersionInfo.value = { error: String(e) };
         updateModalStatus.value = "failed";
-        setTimeout(() => {
-            updateModalVisible.value = false;
-        }, 3000);
     }
 };
 
-// 用户点击确认更新，开始下载
+// 取消检查更新
+const cancelCheckUpdate = () => {
+    checkAbortController?.abort();
+    updateModalVisible.value = false;
+};
+
+// 用户确认下载更新
 const confirmUpdate = async () => {
     if (!currentUpdate.value) return;
 
+    downloadCancelled.value = false;
     updateModalStatus.value = "downloading";
-    updateMessage.value = "正在下载更新...";
     updateProgress.value = 0;
 
     let downloaded = 0;
@@ -101,6 +153,9 @@ const confirmUpdate = async () => {
     try {
         // 执行下载并安装，监听进度
         await currentUpdate.value.downloadAndInstall((event) => {
+            // 每个进度回调都检查是否已取消
+            if (downloadCancelled.value) return;
+
             switch (event.event) {
                 case "Started":
                     contentLength = event.data.contentLength;
@@ -119,20 +174,34 @@ const confirmUpdate = async () => {
             }
         });
 
-        // 安装完成
-        updateMessage.value = "更新已准备就绪，正在重启...";
-        updateModalStatus.value = "success";
+        // 如果已被取消，不进入 ready 状态
+        if (downloadCancelled.value) return;
 
-        setTimeout(async () => {
-            await relaunch(); // 重启应用
-        }, 1500);
+        // 下载安装完成，等待用户决定是否重启
+        updateModalStatus.value = "ready";
     } catch (e) {
-        updateMessage.value = "更新下载失败：" + e;
+        // 如果是用户主动取消，不显示错误
+        if (downloadCancelled.value) return;
+
+        currentVersionInfo.value = { error: String(e) };
         updateModalStatus.value = "failed";
-        setTimeout(() => {
-            updateModalVisible.value = false;
-        }, 3000);
     }
+};
+
+// 取消下载更新
+const cancelUpdateDownload = async () => {
+    downloadCancelled.value = true;
+    try {
+        await currentUpdate.value?.close();
+    } catch (_) {
+        // 忽略关闭错误
+    }
+    updateModalVisible.value = false;
+};
+
+// 用户选择立即重启
+const restartApp = async () => {
+    await relaunch();
 };
 </script>
 
@@ -307,69 +376,176 @@ const confirmUpdate = async () => {
 
     <n-modal
         v-model:show="updateModalVisible"
-        title="检查更新"
-        :mask-closable="false"
-        :show-close="true"
+        :show-header="false"
+        :mask-closable="
+            updateModalStatus !== 'checking' &&
+            updateModalStatus !== 'downloading'
+        "
+        :closable="false"
         :show-footer="false"
         :style="{
-            width: '400px',
-            borderRadius: '8px',
+            width: '520px',
+            borderRadius: '12px',
+            overflow: 'hidden',
         }"
-        :mask-style="{ backgroundColor: 'rgba(0,0,0,0.35)' }"
+        :mask-style="{ backgroundColor: 'rgba(0,0,0,0.4)' }"
     >
-        <div
-            style="
-                margin-top: 10px;
-                display: flex;
-                padding: 2rem;
-                line-height: 1.5rem;
-                flex-direction: column;
-                align-items: center;
-                text-align: center;
-                background-color: #fff;
-                border-radius: 8px;
-            "
-        >
-            <p
-                :style="{
-                    color:
-                        updateModalStatus === 'failed'
-                            ? 'red'
-                            : updateModalStatus === 'success'
-                              ? '#1ba059'
-                              : updateModalStatus === 'latest'
-                                ? '#1ba059'
-                                : '#333',
-                    fontWeight: 500,
-                }"
-            >
-                {{ updateMessage }}
-            </p>
-
-            <div
-                v-if="updateModalStatus === 'confirm'"
-                style="margin-top: 20px; display: flex; gap: 15px"
-            >
-                <n-button @click="updateModalVisible = false">取消</n-button>
-                <n-button type="primary" @click="confirmUpdate"
-                    >立即更新</n-button
-                >
+        <div class="update-container">
+            <!-- 头部 -->
+            <div class="update-header">
+                <n-icon :size="28" color="#fff">
+                    <CloudDownloadOutline />
+                </n-icon>
+                <span class="update-header-title">检查更新</span>
             </div>
 
-            <n-progress
-                v-if="updateModalStatus === 'downloading'"
-                :percentage="updateProgress"
-                :show-indicator="false"
-                type="line"
-                processing
-                style="
-                    width: 100%;
-                    height: 18px;
-                    border-radius: 9px;
-                    margin-top: 10px;
-                "
-                :status="updateModalStatus === 'failed' ? 'error' : 'success'"
-            />
+            <!-- 内容区 -->
+            <div class="update-body">
+                <!-- 检查中 -->
+                <div
+                    v-if="updateModalStatus === 'checking'"
+                    class="update-center"
+                >
+                    <n-spin size="40" />
+                    <p class="update-tip">正在检查更新，请稍候...</p>
+                    <n-button size="small" @click="cancelCheckUpdate"
+                        >取消</n-button
+                    >
+                </div>
+
+                <!-- 发现新版本 -->
+                <template
+                    v-if="updateModalStatus === 'confirm' && currentUpdate"
+                >
+                    <div class="update-version-row">
+                        <div class="version-badge old">
+                            v{{ currentUpdate.currentVersion }}
+                        </div>
+                        <n-icon :size="18" color="#999" style="margin: 0 8px">
+                            <RefreshOutline />
+                        </n-icon>
+                        <div class="version-badge new">
+                            v{{ currentUpdate.version }}
+                        </div>
+                    </div>
+                    <div v-if="currentUpdate.date" class="update-date">
+                        发布于 {{ currentUpdate.date }}
+                    </div>
+                    <div
+                        v-if="currentUpdate.body"
+                        class="release-body"
+                        v-html="renderedConfirmBody"
+                    ></div>
+                    <div class="update-actions">
+                        <n-button @click="updateModalVisible = false"
+                            >稍后再说</n-button
+                        >
+                        <n-button type="primary" @click="confirmUpdate">
+                            <template #icon>
+                                <n-icon><DownloadOutline /></n-icon>
+                            </template>
+                            立即更新
+                        </n-button>
+                    </div>
+                </template>
+
+                <!-- 已是最新版本 -->
+                <template v-if="updateModalStatus === 'latest'">
+                    <div class="update-center">
+                        <n-icon :size="48" color="#18a058">
+                            <CheckmarkCircleOutline />
+                        </n-icon>
+                        <p class="update-success-title">当前已是最新版本</p>
+                        <p class="update-success-sub">v{{ version }}</p>
+                    </div>
+                    <div
+                        v-if="currentVersionInfo?.date"
+                        class="update-date"
+                        style="text-align: center; margin-top: 4px"
+                    >
+                        发布于 {{ currentVersionInfo.date }}
+                    </div>
+                    <div
+                        v-if="currentVersionInfo?.body"
+                        class="release-body"
+                        v-html="renderedLatestBody"
+                    ></div>
+                    <div class="update-actions">
+                        <n-button
+                            type="primary"
+                            @click="updateModalVisible = false"
+                            >关闭</n-button
+                        >
+                    </div>
+                </template>
+
+                <!-- 下载中 -->
+                <template v-if="updateModalStatus === 'downloading'">
+                    <div class="update-center">
+                        <p class="update-tip">
+                            正在下载更新 v{{ currentUpdate?.version }}...
+                        </p>
+                        <n-progress
+                            :percentage="updateProgress"
+                            :show-indicator="true"
+                            type="line"
+                            processing
+                            style="width: 100%; margin: 12px 0"
+                        />
+                        <n-button size="small" @click="cancelUpdateDownload"
+                            >取消下载</n-button
+                        >
+                    </div>
+                </template>
+
+                <!-- 下载完成 -->
+                <template v-if="updateModalStatus === 'ready'">
+                    <div class="update-center">
+                        <n-icon :size="48" color="#18a058">
+                            <CheckmarkCircleOutline />
+                        </n-icon>
+                        <p class="update-success-title">更新已准备就绪</p>
+                        <p class="update-success-sub">重启应用即可完成更新</p>
+                    </div>
+                    <div class="update-actions">
+                        <n-button @click="updateModalVisible = false"
+                            >稍后重启</n-button
+                        >
+                        <n-button type="primary" @click="restartApp">
+                            <template #icon>
+                                <n-icon><RefreshOutline /></n-icon>
+                            </template>
+                            立即重启
+                        </n-button>
+                    </div>
+                </template>
+
+                <!-- 失败 -->
+                <template v-if="updateModalStatus === 'failed'">
+                    <div class="update-center">
+                        <n-icon :size="48" color="#d03050">
+                            <CloseCircleOutline />
+                        </n-icon>
+                        <p class="update-error-title">检查更新失败</p>
+                        <p
+                            v-if="currentVersionInfo?.error"
+                            class="update-error-detail"
+                        >
+                            {{ currentVersionInfo.error }}
+                        </p>
+                    </div>
+                    <div class="update-actions">
+                        <n-button @click="updateModalVisible = false"
+                            >关闭</n-button
+                        >
+                        <n-button
+                            type="primary"
+                            @click="onCheckUpdateClick($event)"
+                            >重试</n-button
+                        >
+                    </div>
+                </template>
+            </div>
         </div>
     </n-modal>
 </template>
@@ -437,5 +613,192 @@ const confirmUpdate = async () => {
             }
         }
     }
+}
+
+.release-body {
+    max-height: 240px;
+    overflow-y: auto;
+    padding: 12px 16px;
+    background: #f8f8f8;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    color: #444;
+    line-height: 1.7;
+    margin-top: 12px;
+
+    :deep(h1),
+    :deep(h2),
+    :deep(h3),
+    :deep(h4) {
+        margin: 12px 0 6px;
+        font-weight: 600;
+        color: #333;
+    }
+    :deep(h1) {
+        font-size: 1.15rem;
+    }
+    :deep(h2) {
+        font-size: 1.05rem;
+    }
+    :deep(h3) {
+        font-size: 0.95rem;
+    }
+
+    :deep(p) {
+        margin: 4px 0;
+    }
+
+    :deep(ul),
+    :deep(ol) {
+        padding-left: 1.4em;
+        margin: 4px 0;
+    }
+
+    :deep(li) {
+        margin: 2px 0;
+    }
+
+    :deep(code) {
+        padding: 1px 5px;
+        background: #e8e8e8;
+        border-radius: 3px;
+        font-size: 0.82rem;
+    }
+
+    :deep(pre) {
+        margin: 8px 0;
+        padding: 10px;
+        background: #2d2d2d;
+        color: #ccc;
+        border-radius: 5px;
+        overflow-x: auto;
+        code {
+            background: none;
+            padding: 0;
+            color: inherit;
+        }
+    }
+
+    :deep(a) {
+        color: #18a058;
+        text-decoration: none;
+        &:hover {
+            text-decoration: underline;
+        }
+    }
+
+    :deep(hr) {
+        margin: 10px 0;
+        border: none;
+        border-top: 1px solid #ddd;
+    }
+}
+
+// 更新弹窗样式
+.update-container {
+    background: #fff;
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.update-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 24px;
+    background: linear-gradient(135deg, #18a058, #1ba059);
+
+    &-title {
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: #fff;
+    }
+}
+
+.update-body {
+    padding: 24px;
+}
+
+.update-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 16px 0 8px;
+}
+
+.update-tip {
+    margin: 16px 0 12px;
+    font-size: 0.95rem;
+    color: #555;
+}
+
+.update-version-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 8px;
+}
+
+.version-badge {
+    display: inline-block;
+    padding: 4px 14px;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+
+    &.old {
+        background: #f0f0f0;
+        color: #888;
+    }
+
+    &.new {
+        background: #e8f5e9;
+        color: #18a058;
+    }
+}
+
+.update-date {
+    text-align: center;
+    font-size: 0.82rem;
+    color: #999;
+    margin-bottom: 4px;
+}
+
+.update-success-title {
+    margin: 12px 0 4px;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #333;
+}
+
+.update-success-sub {
+    font-size: 0.88rem;
+    color: #888;
+    margin: 0;
+}
+
+.update-error-title {
+    margin: 12px 0 4px;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: #d03050;
+}
+
+.update-error-detail {
+    font-size: 0.82rem;
+    color: #999;
+    margin: 4px 0 0;
+    max-width: 100%;
+    word-break: break-all;
+    text-align: center;
+}
+
+.update-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #f0f0f0;
 }
 </style>
