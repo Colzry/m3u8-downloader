@@ -159,9 +159,8 @@ jobs:
 
       - name: Upload latest.json to release
         uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.DEPLOY_KEY }}
         with:
+          token: ${{ secrets.DEPLOY_KEY }}
           files: latest.json
           tag_name: ${{ github.ref_name }}
           draft: true
