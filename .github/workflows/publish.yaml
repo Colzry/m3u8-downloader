@@ -3,8 +3,8 @@ name: "publish"
 on:
   push:
     tags:
-      - 'v*'
-      - 'app-v*'
+      - "v*"
+      - "app-v*"
 
 jobs:
   publish-tauri:
@@ -14,26 +14,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
-            target: 'aarch64-apple-darwin'
-            args: '--target aarch64-apple-darwin --config src-tauri/tauri.macos-aarch64.conf.json'
+          - platform: "macos-latest"
+            target: "aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin --config src-tauri/tauri.macos-aarch64.conf.json"
 
-          - platform: 'macos-latest'
-            target: 'x86_64-apple-darwin'
-            args: '--target x86_64-apple-darwin --config src-tauri/tauri.macos-x86_64.conf.json'
+          - platform: "macos-latest"
+            target: "x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin --config src-tauri/tauri.macos-x86_64.conf.json"
 
-          - platform: 'ubuntu-22.04'
-            target: 'x86_64-unknown-linux-gnu'
-            args: '--config src-tauri/tauri.linux.conf.json'
+          - platform: "ubuntu-22.04"
+            target: "x86_64-unknown-linux-gnu"
+            args: "--config src-tauri/tauri.linux.conf.json"
 
-          - platform: 'windows-latest'
-            target: 'x86_64-pc-windows-msvc'
-            args: '--config src-tauri/tauri.windows.conf.json'
+          - platform: "windows-latest"
+            target: "x86_64-pc-windows-msvc"
+            args: "--config src-tauri/tauri.windows.conf.json"
 
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
@@ -42,10 +42,10 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: lts/*
-          cache: 'yarn'
+          cache: "yarn"
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
@@ -55,7 +55,7 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: "./src-tauri -> target"
 
       - name: Install frontend dependencies
         run: yarn install
@@ -77,25 +77,24 @@ jobs:
 
       # 上传构建产物作为 artifacts
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: src-tauri/target/**/release/bundle/**/*
           retention-days: 1
 
-
-# ============================================================
-#           自动生成 latest.json
-# ============================================================
+  # ============================================================
+  #           自动生成 latest.json
+  # ============================================================
   generate-latest-json:
     needs: publish-tauri
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
 
@@ -105,7 +104,7 @@ jobs:
           echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
           echo "GITHUB_SHA=$GITHUB_SHA"
-          
+
           VERSION="$GITHUB_REF_NAME"
           echo "Creating latest.json for version: $VERSION"
 
@@ -160,7 +159,7 @@ jobs:
           cat latest.json
 
       - name: Upload latest.json to release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.DEPLOY_KEY }}
         with:
