@@ -4,7 +4,7 @@
   "version": "1.2.7",
   "identifier": "com.m3u8.downloader.app",
   "build": {
-    "beforeDevCommand": "yarn dev",
+    "beforeDevCommand": "node src-tauri/scripts/download-ffmpeg.cjs && yarn dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "yarn build && node src-tauri/scripts/download-ffmpeg.cjs",
     "frontendDist": "../dist"

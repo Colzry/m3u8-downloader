@@ -158,7 +158,8 @@ async fn download_file(
         log::warn!("[{}] 返回空数据，标记为 Skipped", url);
         return Ok(DownloadResult::Skipped(url.to_string()));
     }
-    // 检查是否 HTML/XML 内容
+
+    // 检查是否 HTML/XML 内容（基于 Content-Type 头）
     let content_type = response
         .headers()
         .get("Content-Type")
@@ -166,8 +167,41 @@ async fn download_file(
         .unwrap_or("");
 
     if content_type.starts_with("text/html") || content_type.contains("xml") {
-        log::warn!("[{}] 是 HTML 内容，标记为 Skipped", url);
-        return Ok(DownloadResult::Skipped(url.to_string()));
+        log::warn!(
+            "[{}] Content-Type 为 HTML/XML ({}), 视为网络错误以便重试",
+            url,
+            content_type
+        );
+        return Err(anyhow!(
+            "服务器返回了 HTML/XML 内容而非 TS 分片，Content-Type: {}",
+            content_type
+        ));
+    }
+
+    // 基于内容的兜底检测：如果 Content-Type 不可信，检查数据头部
+    // 有效 TS 分片以 0x47 同步字节开头，HTML 以 '<' (0x3C) 开头
+    if buffer.len() >= 4 {
+        let first_byte = buffer[0];
+        // 检测 HTML 内容（以 '<' 开头，如 <html, <!DOCTYPE, <head 等）
+        if first_byte == b'<' {
+            let preview = String::from_utf8_lossy(&buffer[..buffer.len().min(200)]);
+            log::warn!(
+                "[{}] 内容以 '<' 开头，疑似 HTML 响应（预览: {}），视为网络错误以便重试",
+                url,
+                preview.chars().take(80).collect::<String>()
+            );
+            return Err(anyhow!("服务器返回了 HTML 内容而非 TS 分片"));
+        }
+        // 检测 JSON 错误响应（以 '{' 或 '[' 开头）
+        if first_byte == b'{' || first_byte == b'[' {
+            let preview = String::from_utf8_lossy(&buffer[..buffer.len().min(200)]);
+            log::warn!(
+                "[{}] 内容以 JSON 开头，疑似错误响应（预览: {}），视为网络错误以便重试",
+                url,
+                preview.chars().take(80).collect::<String>()
+            );
+            return Err(anyhow!("服务器返回了 JSON 内容而非 TS 分片"));
+        }
     }
 
     // AES-128解密处理
@@ -520,8 +554,26 @@ pub async fn download_m3u8(
                         return Ok(());
                     }
                     Ok(DownloadResult::Skipped(f)) => {
-                        log::warn!("分片 [{}] 内容无效，已跳过", f);
-                        return Ok(());
+                        log::warn!(
+                            "分片 [{}] 返回空数据（尝试 {}/{}），稍后重试",
+                            f,
+                            attempt,
+                            MAX_RETRIES
+                        );
+                        if attempt < MAX_RETRIES {
+                            // 空响应可能是网络波动，退避后重试
+                            let base_delay_secs = (1 << (attempt - 1)).min(10);
+                            let mut rng = SmallRng::from_entropy();
+                            let random_millis = rng.gen_range(0..1000);
+                            let total_delay = Duration::from_secs(base_delay_secs as u64)
+                                + Duration::from_millis(random_millis);
+                            log::info!("分片 [{}] 空数据退避，等待 {:?}", f, total_delay);
+                            tokio::time::sleep(total_delay).await;
+                        } else {
+                            log::error!("分片 [{}] 所有重试均返回空数据，放弃该分片", f);
+                            // 最终仍然为空，标记为 Skipped 不计入 completed_chunks
+                            return Ok(());
+                        }
                     }
                     Ok(DownloadResult::Cancelled(f)) => {
                         log::debug!("分片 [{}] 因取消而中断", f);
@@ -584,7 +636,9 @@ pub async fn download_m3u8(
             cancelled.store(true, Ordering::SeqCst);
             // 等待速度监控任务退出
             speed_handle.await?;
-            return Err(anyhow::anyhow!("下载失败，部分分片缺失，可改小线程数后尝试继续下载"));
+            return Err(anyhow::anyhow!(
+                "下载失败，部分分片缺失，可改小线程数后尝试继续下载"
+            ));
         }
     } else {
         log::info!("任务 [{}] 所有分片均已就绪，准备合并", id);
