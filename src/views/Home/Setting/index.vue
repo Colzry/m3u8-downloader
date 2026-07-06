@@ -13,7 +13,7 @@ import {
     DownloadOutline,
     RefreshOutline,
 } from "@vicons/ionicons5";
-import { ref, computed } from "vue";
+import { ref, shallowRef, computed } from "vue";
 import { marked } from "marked";
 
 // 引入官方的 updater 和 process 插件 API
@@ -74,8 +74,8 @@ const updateModalVisible = ref(false);
 const updateProgress = ref(0);
 const updateModalStatus = ref("idle"); // "idle" | "checking" | "confirm" | "downloading" | "ready" | "failed" | "latest"
 
-// 用于保存检查到的更新对象
-const currentUpdate = ref(null);
+// 用于保存检查到的更新对象（shallowRef 避免 Proxy 破坏 Tauri Resource 私有字段）
+const currentUpdate = shallowRef(null);
 // 当前版本的发布信息（latest 状态下展示）
 const currentVersionInfo = ref(null);
 // 用于取消下载
@@ -652,10 +652,20 @@ const restartApp = async () => {
     :deep(ol) {
         padding-left: 1.4em;
         margin: 4px 0;
+        list-style-position: outside;
+    }
+
+    :deep(ul) {
+        list-style-type: disc;
+    }
+
+    :deep(ol) {
+        list-style-type: decimal;
     }
 
     :deep(li) {
         margin: 2px 0;
+        display: list-item;
     }
 
     :deep(code) {
