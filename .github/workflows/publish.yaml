@@ -73,7 +73,6 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
-          includeSignature: false
 
       # 上传构建产物作为 artifacts
       - name: Upload artifacts
