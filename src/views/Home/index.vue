@@ -81,6 +81,21 @@ const menuOptions = [
 listen("open_settings", () => {
     router.push({ name: "Setting" });
 });
+
+// 路由映射表：路由名称 -> URL hash
+const routeHashMap = {
+    DownloadList: "dList",
+    DownloadCompleted: "dCompleted",
+    Setting: "setting",
+};
+
+// 监听路由变化，保存当前路由到 store，以便重建窗口时恢复
+router.afterEach((to) => {
+    const hash = routeHashMap[to.name];
+    if (hash) {
+        settingStore.lastRoute = hash;
+    }
+});
 </script>
 
 <template>

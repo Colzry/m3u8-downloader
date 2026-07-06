@@ -11,6 +11,7 @@ export const useSettingStore = defineStore("Setting", {
     enableNotification: true, // 下载完成是否弹出系统通知
     minimizeOnClose: true, // false 退出程序  true 最小化
     logLevel: "Info", // 日志级别
+    lastRoute: "dList", // 上次关闭时的路由，用于重建窗口时恢复
   }),
   actions: {},
   persist: true, // 启用持久化

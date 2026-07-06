@@ -144,15 +144,29 @@ fn restore_window(window: &tauri::WebviewWindow) {
 }
 
 /// 获取现有主窗口，如果不存在（被 Linux 销毁了）则重新创建一个
+/// 自动从 settings.dat 读取 lastRoute 恢复上次页面
 pub fn get_or_create_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     if let Some(window) = app.get_webview_window("main") {
         return Some(window);
     }
 
-    // 窗口已被销毁 — 重建窗口
-    log::warn!("tray: window-not-found label=main — recreating...");
+    // 窗口已被销毁 — 从 store 读取上次路由，重建窗口
+    let last_route = app
+        .store("settings.dat")
+        .ok()
+        .and_then(|s| s.get("lastRoute"))
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "dList".to_string());
 
-    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let url = format!("index.html#/{}", last_route);
+    create_main_window(app, &url)
+}
+
+/// 以指定 URL 创建主窗口
+pub fn create_main_window(app: &AppHandle, url: &str) -> Option<tauri::WebviewWindow> {
+    log::warn!("tray: creating window with url={}", url);
+
+    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App(url.into()))
         .title("m3u8下载器")
         .inner_size(1200.0, 750.0)
         .min_inner_size(1200.0, 750.0)
@@ -175,7 +189,7 @@ pub fn get_or_create_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow
 
     match builder.build() {
         Ok(w) => {
-            log::info!("tray: window-recreated label=main");
+            log::info!("tray: window-created label=main");
 
             // ==========================================
             // 为新复活的窗口重新绑定关闭拦截逻辑
@@ -213,7 +227,7 @@ pub fn get_or_create_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow
             Some(w)
         }
         Err(e) => {
-            log::error!("tray: window-recreate-failed error={}", e);
+            log::error!("tray: window-create-failed error={}", e);
             None
         }
     }
@@ -271,12 +285,23 @@ fn enable_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 }
             }
             "settings" => {
-                // 通知前端打开设置页面
-                let _ = app.emit("open_settings", "");
+                #[cfg(target_os = "macos")]
+                {
+                    use tauri::ActivationPolicy;
+                    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+                }
 
-                // 同样使用安全重建逻辑
-                if let Some(window) = get_or_create_main_window(app) {
-                    restore_window(&window);
+                // 窗口已存在时直接发送事件；不存在时以设置路由重建
+                if app.get_webview_window("main").is_some() {
+                    if let Some(window) = get_or_create_main_window(app) {
+                        let _ = window.emit("open_settings", "");
+                        restore_window(&window);
+                    }
+                } else {
+                    let url = "index.html#/setting";
+                    if let Some(window) = create_main_window(app, url) {
+                        restore_window(&window);
+                    }
                 }
             }
             "quit" => {
