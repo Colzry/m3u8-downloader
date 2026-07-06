@@ -243,6 +243,18 @@ const restartApp = async () => {
 
                 <div class="set-item">
                     <div class="set-label">
+                        <div>下载完成时弹出通知</div>
+                    </div>
+                    <div class="set-value">
+                        <n-switch
+                            size="small"
+                            v-model:value="settingStore.enableNotification"
+                        />
+                    </div>
+                </div>
+
+                <div class="set-item">
+                    <div class="set-label">
                         <div>关闭主窗口</div>
                     </div>
                     <div class="set-value">

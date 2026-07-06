@@ -6,6 +6,7 @@ use std::fs;
 use std::time::Duration;
 use sysinfo::{System, SystemExt};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -20,12 +21,11 @@ pub async fn start_download(
     manager: tauri::State<'_, DownloadManager>, // 注入全局管理器
     headers: Option<std::collections::HashMap<String, String>>, // 自定义请求头
 ) -> Result<(), String> {
-    
     if manager.task_exists(&id).await {
-            log::warn!("任务 [{}] 已在运行中，忽略本次请求", id);
-            return Ok(());
+        log::warn!("任务 [{}] 已在运行中，忽略本次请求", id);
+        return Ok(());
     }
-    
+
     let temp_dir = format!("{}/temp_{}", output_dir, id);
 
     log::info!("Name: [{}], URL: [{}], ID: [{}] - 开始下载", name, url, id);
@@ -332,4 +332,15 @@ pub async fn check_update(app: tauri::AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// 通过 Rust 后端发送系统通知
+#[tauri::command]
+pub fn send_notification_cmd(app: AppHandle, title: String, body: String) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(&title)
+        .body(&body)
+        .show()
+        .map_err(|e| format!("发送通知失败: {}", e))
 }

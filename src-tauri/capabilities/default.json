@@ -17,6 +17,7 @@
     "store:allow-save",
     "store:allow-load",
     "updater:default",
+    "notification:default",
     {
       "identifier": "fs:scope",
       "allow": [

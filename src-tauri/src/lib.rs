@@ -1,6 +1,6 @@
 use crate::commands::{
     cancel_download, check_update, delete_download, delete_file, get_cpu_info, save_settings,
-    save_store_file, start_download,
+    save_store_file, send_notification_cmd, start_download,
 };
 use crate::download_manager::DownloadManager;
 use tauri::{
@@ -49,6 +49,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if let Err(e) = logger::setup_logging(&app.handle()) {
                 log::error!("初始化Tauri日志失败：{}", e);
@@ -106,6 +107,7 @@ pub fn run() {
             save_settings,
             check_update,
             save_store_file,
+            send_notification_cmd,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
