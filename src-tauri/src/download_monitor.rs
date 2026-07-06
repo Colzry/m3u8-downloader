@@ -56,13 +56,16 @@ impl DownloadMetrics {
     async fn get_windowed_speed(&self) -> (f64, &'static str) {
         let now = Instant::now();
         let samples = self.speed_samples.lock().await;
-        // 只考虑过去 1 秒的采样
+        // 只考虑过去 1 秒的采样，直接在迭代器上求和，避免分配 Vec
         let cutoff = now - Duration::from_secs(1);
-        let relevant: Vec<_> = samples.iter().filter(|(t, _)| *t >= cutoff).collect();
-        if relevant.is_empty() {
+        let total_bytes: usize = samples
+            .iter()
+            .filter(|(t, _)| *t >= cutoff)
+            .map(|(_, size)| *size)
+            .sum();
+        if total_bytes == 0 {
             return (0.0, "KB/s");
         }
-        let total_bytes: usize = relevant.iter().map(|&(_, size)| size).sum();
         let duration = now.duration_since(cutoff).as_secs_f64().max(0.5); // 避免除零
         let bytes_per_second = total_bytes as f64 / duration;
         let speed_kb = bytes_per_second / 1024.0;

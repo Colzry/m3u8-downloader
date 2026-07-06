@@ -79,6 +79,23 @@ fn parse_ext_x_key(line: &str) -> Result<(String, String, Option<String>)> {
     Ok((method, uri, iv))
 }
 
+/// 将相对URL解析为绝对URL
+/// - `base`: 当前M3U8文件的完整URL
+/// - `relative`: 可能是绝对URL、以 / 开头的根路径、或相对路径
+fn resolve_url(base: &str, relative: &str) -> String {
+    if relative.starts_with("http") {
+        relative.to_string()
+    } else if relative.starts_with('/') {
+        // 绝对路径 - 相对于域名根目录
+        let origin = base.split('/').take(3).collect::<Vec<&str>>().join("/");
+        format!("{}{}", origin, relative)
+    } else {
+        // 相对路径 - 相对于M3U8文件所在目录
+        let dir = base.rsplit_once('/').map(|(d, _)| d).unwrap_or(base);
+        format!("{}/{}", dir, relative)
+    }
+}
+
 /// 自定义下载请求头选项
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
@@ -220,10 +237,10 @@ async fn download_file(
 
         let decryptor = Decryptor::<Aes128>::new(key, iv);
 
-        let mut buffer_clone = buffer.clone();
-
+        // buffer 之后不再使用，直接 move 进解密器，避免 clone
+        let mut buf = buffer;
         let decrypted = decryptor
-            .decrypt_padded_mut::<Pkcs7>(&mut buffer_clone)
+            .decrypt_padded_mut::<Pkcs7>(&mut buf)
             .map_err(|e| anyhow!("Decryption failed: {:?}", e))?;
 
         decrypted.to_vec()
@@ -295,7 +312,12 @@ pub async fn download_m3u8(
     // 创建输出目录
     fs::create_dir_all(temp_dir).await?;
 
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
+        .pool_max_idle_per_host(concurrency)
+        .build()
+        .map_err(|e| anyhow!("创建 HTTP Client 失败: {}", e))?;
     // 预处理headers，只验证一次
     let headers = preprocess_headers(&options.headers);
     log::info!("headers: {:#?}", headers);
@@ -318,7 +340,6 @@ pub async fn download_m3u8(
         }
     } else {
         // 第一次下载，需要解析M3U8文件
-        // 解析M3U8文件内容
         let request = client.get(url).headers(headers.clone());
         let raw_response = request.send().await?;
         let status = raw_response.status();
@@ -332,28 +353,67 @@ pub async fn download_m3u8(
         // 验证 M3U8
         validate_m3u8_response(status, &response_text, content_type.as_deref()).await?;
 
+        // 检测是否为 Master Playlist（包含 #EXT-X-STREAM-INF）
+        // 如果是，选择最高码率的子流继续解析
+        let (response_text, parse_base_url) = if response_text
+            .lines()
+            .any(|l| l.starts_with("#EXT-X-STREAM-INF"))
+        {
+            log::info!("检测到 Master Playlist，正在选择最高码率子流...");
+            let mut best_bandwidth = 0u64;
+            let mut best_url = String::new();
+            let mut pending_bandwidth = 0u64;
+
+            for line in response_text.lines() {
+                let line = line.trim();
+                if line.starts_with("#EXT-X-STREAM-INF") {
+                    pending_bandwidth = line
+                        .split(',')
+                        .find(|p| p.trim().starts_with("BANDWIDTH="))
+                        .and_then(|p| p.trim().strip_prefix("BANDWIDTH="))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0);
+                } else if !line.is_empty() && !line.starts_with('#') {
+                    if pending_bandwidth > best_bandwidth {
+                        best_bandwidth = pending_bandwidth;
+                        best_url = line.to_string();
+                    }
+                    pending_bandwidth = 0;
+                }
+            }
+
+            if best_url.is_empty() {
+                return Err(anyhow!("Master Playlist 中未找到有效的子流"));
+            }
+
+            let sub_url = resolve_url(url, &best_url);
+            log::info!("已选择子流 (bandwidth={}): {}", best_bandwidth, sub_url);
+
+            let sub_response = client.get(&sub_url).headers(headers.clone()).send().await?;
+            let sub_status = sub_response.status();
+            let sub_ct = sub_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let sub_text = sub_response.text().await?;
+            validate_m3u8_response(sub_status, &sub_text, sub_ct.as_deref()).await?;
+            // 子流 URL 作为后续解析的基准 URL
+            (sub_text, sub_url)
+        } else {
+            (response_text, url.to_string())
+        };
+
         let mut current_encryption = None;
-        let mut ts_index = 0; // 单独维护 TS 文件的索引
+        let mut ts_index = 0;
 
         for line in response_text.lines() {
             let line = line.trim();
             if line.starts_with("#EXT-X-KEY:") {
-                // 处理加密信息
                 let (method, key_uri, iv_str) = parse_ext_x_key(line)?;
                 if method.to_uppercase() == "AES-128" {
-                    // 构建完整密钥URL
-                    let key_url = if key_uri.starts_with("http") {
-                        key_uri.clone()
-                    } else if key_uri.starts_with('/') {
-                        // 处理绝对路径（以/开头）- 相对于域名根目录解析
-                        let base_url = url.split("/").take(3).collect::<Vec<&str>>().join("/");
-                        format!("{}{}", base_url, key_uri)
-                    } else {
-                        // 处理相对路径 - 相对于M3U8文件所在目录解析
-                        format!("{}/{}", url.rsplit_once('/').unwrap().0, key_uri)
-                    };
+                    let key_url = resolve_url(&parse_base_url, &key_uri);
 
-                    // 下载密钥文件
                     let key_response = client
                         .get(&key_url)
                         .headers(headers.clone())
@@ -363,7 +423,6 @@ pub async fn download_m3u8(
                         .await?;
                     let key = key_response.to_vec();
 
-                    // 解析IV值
                     let iv = iv_str.as_ref().and_then(|iv_raw| {
                         let hex = iv_raw.strip_prefix("0x").unwrap_or(iv_raw);
                         hex_to_bytes(hex).ok()
@@ -377,18 +436,9 @@ pub async fn download_m3u8(
             }
 
             // 收集TS分片任务
-            if line.ends_with(".ts") {
-                // TS 分片如果是完整 URL，直接使用
-                let ts_url = if line.starts_with("http") {
-                    line.to_string()
-                } else if line.starts_with('/') {
-                    // 处理绝对路径（以/开头）- 相对于域名根目录解析
-                    let base_url = url.split("/").take(3).collect::<Vec<&str>>().join("/");
-                    format!("{}{}", base_url, line)
-                } else {
-                    // 处理相对路径 - 相对于M3U8文件所在目录解析
-                    format!("{}/{}", url.rsplit_once('/').unwrap().0, line)
-                };
+            // 支持带查询参数的URL，如 segment.ts?token=abc
+            if !line.starts_with('#') && line.contains(".ts") {
+                let ts_url = resolve_url(&parse_base_url, line);
                 let filename = format!("{}/part_{}.ts", temp_dir, ts_index);
                 all_ts_segments.push((ts_index, ts_url, filename, current_encryption.clone()));
                 ts_index += 1;
@@ -519,7 +569,7 @@ pub async fn download_m3u8(
         handles.push(tokio::spawn(async move {
             let _permit = semaphore.acquire().await?;
 
-            const MAX_RETRIES: usize = 99;
+            const MAX_RETRIES: usize = 15;
             for attempt in 1..=MAX_RETRIES {
                 if cancelled.load(Ordering::Relaxed) {
                     return Ok::<(), anyhow::Error>(());
@@ -547,6 +597,7 @@ pub async fn download_m3u8(
                             writer
                                 .write_all(format!("{}\n", relative_name).as_bytes())
                                 .await?;
+                            writer.flush().await?;
                         }
 
                         // 将已完成计数器 +1
