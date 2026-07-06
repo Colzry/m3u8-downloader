@@ -267,6 +267,24 @@ export const useDownloadingStore = defineStore("Downloading", {
           // 合并视频监听
           listen("merge_video", (event) => {
             const data = event.payload;
+            if (data.id === taskId && !data.isMerged) {
+              // 合并失败
+              const settingStore = useSettingStore();
+              if (settingStore.enableNotification) {
+                const item = this.items.find((i) => i.id === taskId);
+                const title = item?.title || "视频";
+                invoke("send_notification_cmd", {
+                  title: "合并失败",
+                  body: `${title} 合并失败`,
+                }).catch((e) => {
+                  console.error("发送通知失败:", e);
+                });
+              }
+              this.updateItem(data.id, { status: 400 });
+              this.cleanupTaskListeners(taskId);
+              this.tryStartNextDownloads();
+              return;
+            }
             if (data.id === taskId && data.isMerged) {
               // 发送系统通知
               const settingStore = useSettingStore();
@@ -317,6 +335,15 @@ export const useDownloadingStore = defineStore("Downloading", {
           headers: item.headers || {},
         }).catch(async (err) => {
           await this.cancelDownload(item.id);
+          // 发送系统通知
+          if (settingStore.enableNotification) {
+            invoke("send_notification_cmd", {
+              title: "下载失败",
+              body: `${item.title} 下载失败`,
+            }).catch((e) => {
+              console.error("发送通知失败:", e);
+            });
+          }
           this.$notify.error({
             content: this.getItemById(item.id).title + "下载失败",
             meta: err,
