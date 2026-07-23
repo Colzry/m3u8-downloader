@@ -405,7 +405,7 @@ const restartApp = async () => {
         <div class="update-container">
             <!-- 头部 -->
             <div class="update-header">
-                <n-icon :size="28" color="#fff">
+                <n-icon :size="20" color="#fff">
                     <CloudDownloadOutline />
                 </n-icon>
                 <span class="update-header-title">检查更新</span>
@@ -726,12 +726,12 @@ const restartApp = async () => {
 .update-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 18px 24px;
+    gap: 8px;
+    padding: 12px 20px;
     background: linear-gradient(135deg, #18a058, #1ba059);
 
     &-title {
-        font-size: 1.1rem;
+        font-size: 1rem;
         font-weight: 600;
         color: #fff;
     }
