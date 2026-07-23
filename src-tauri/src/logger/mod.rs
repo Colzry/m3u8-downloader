@@ -91,15 +91,7 @@ pub fn setup_logging(app_handle: &AppHandle) -> Result<(), String> {
     rotate::clean_old_logs(&log_dir);
 
     // 根据当前日期构建日志文件名（每天一个）
-    let mut log_file_path = log_dir;
-    log_file_path.push(rotate::get_today_log_file_name());
-
-    // 打开文件追加写入
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file_path)
-        .map_err(|e| e.to_string())?;
+    let today = rotate::get_today_log_file_name().replace(".log", "");
 
     // 从 settings.dat 检测级别 (优先级最高)
     let level_from_settings = detect_log_level_from_settings(app_handle);
@@ -124,7 +116,9 @@ pub fn setup_logging(app_handle: &AppHandle) -> Result<(), String> {
         })
         .level(level)
         .chain(std::io::stdout())
-        .chain(log_file)
+        .chain(Box::new(
+            rotate::DailyRotatingWriter::new(log_dir.clone(), &today).map_err(|e| e.to_string())?,
+        ) as Box<dyn std::io::Write + Send>)
         .apply()
         .map_err(|e| e.to_string())?;
 

@@ -1,5 +1,6 @@
 use chrono::Local;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -12,7 +13,9 @@ pub fn get_today_log_file_name() -> String {
 
 // 获取 log 路径，同时创建目录（如果需要）
 pub fn get_log_dir_path(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let log_dir = app_handle.path().app_log_dir()
+    let log_dir = app_handle
+        .path()
+        .app_log_dir()
         .map_err(|e| format!("无法获取Tauri应用日志目录: {}", e))?;
 
     // 在Linux上，是 $XDG_DATA_HOME/{bundleIdentifier}/logs 或 $HOME/.local/share/{bundleIdentifier}/logs 示例：/home/alice/.local/share/com.tauri.dev/logs
@@ -76,3 +79,50 @@ pub fn clean_old_logs(log_dir: &PathBuf) {
     }
 }
 
+// ============================================================
+//  每日日志轮转 Writer：每次写入前检查日期，过天自动切新文件
+// ============================================================
+pub struct DailyRotatingWriter {
+    log_dir: PathBuf,
+    current_date: String,
+    current_file: std::fs::File,
+}
+
+impl DailyRotatingWriter {
+    pub fn new(log_dir: PathBuf, today: &str) -> io::Result<Self> {
+        let file = Self::open_log_file(&log_dir, today)?;
+        Ok(Self {
+            log_dir,
+            current_date: today.to_string(),
+            current_file: file,
+        })
+    }
+
+    fn open_log_file(log_dir: &PathBuf, date: &str) -> io::Result<std::fs::File> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_dir.join(format!("{}.log", date)))
+    }
+
+    fn rotate_if_needed(&mut self) -> io::Result<()> {
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        if today != self.current_date {
+            let new_file = Self::open_log_file(&self.log_dir, &today)?;
+            self.current_file = new_file;
+            self.current_date = today;
+        }
+        Ok(())
+    }
+}
+
+impl io::Write for DailyRotatingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.rotate_if_needed()?;
+        self.current_file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.current_file.flush()
+    }
+}
