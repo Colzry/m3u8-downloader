@@ -475,68 +475,9 @@ pub async fn download_m3u8(
         .map(|(_, _, path, _)| path.clone())
         .collect();
 
-    // 存储 真正需要下载 的任务
-    let mut pending_downloads = Vec::new();
-
-    // 加载清单文件
     let manifest_path = format!("{}/progress.dat", temp_dir);
-    let mut completed_segment_names = HashSet::new();
 
-    if let Ok(file) = tokio::fs::File::open(&manifest_path).await {
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        while let Some(line) = lines.next_line().await? {
-            if !line.trim().is_empty() {
-                completed_segment_names.insert(line);
-            }
-        }
-    }
-    log::info!(
-        "任务 [{}]: 从清单文件中加载了 {} 条已完成记录",
-        id,
-        completed_segment_names.len()
-    );
-
-    for (index, ts_url, filename, encryption) in all_ts_segments {
-        // 获取相对文件名，例如 "part_123.ts"
-        let relative_name = match Path::new(&filename).file_name().and_then(|s| s.to_str()) {
-            Some(name) => name.to_string(),
-            None => continue, // 路径无效，跳过
-        };
-
-        // 检查清单中是否存在
-        if completed_segment_names.contains(&relative_name) {
-            // 存在，则检查本地文件并更新进度
-            match tokio::fs::metadata(&filename).await {
-                Ok(metadata) if metadata.len() > 0 => {
-                    // 文件有效，视为已下载，仅更新计数器，不需要 push 到数组
-                    let file_size = metadata.len() as usize;
-                    metrics.completed_chunks.fetch_add(1, Ordering::Relaxed);
-                    metrics
-                        .downloaded_bytes
-                        .fetch_add(file_size, Ordering::Relaxed);
-                    metrics.update_total_bytes(file_size); // 更新总字节数
-                }
-                _ => {
-                    // 清单存在，但文件丢失/为空，重新下载
-                    pending_downloads.push((index, ts_url, filename, encryption));
-                }
-            }
-        } else {
-            // 清单不存在，加入下载队列
-            pending_downloads.push((index, ts_url, filename, encryption));
-        }
-    }
-
-    log::info!(
-        "任务 [{}]: 总分片 {}, 已完成 {}, 待下载 {}",
-        id,
-        total_chunks,
-        total_chunks - pending_downloads.len(),
-        pending_downloads.len()
-    );
-
-    // --- 步骤 3: 启动速度监控任务 ---
+    // --- 步骤 3: 启动速度监控任务（仅启动一次，贯穿所有重试轮次）---
     let speed_handle = run_monitor_task(
         id.clone(),
         Arc::clone(&cancelled),
@@ -545,160 +486,283 @@ pub async fn download_m3u8(
     )
     .await;
 
-    // --- 步骤 4: 启动下载任务 (只下载 pending_downloads) ---
-    // 创建一个线程安全的清单文件写入器
-    let manifest_writer = Arc::new(Mutex::new(
-        tokio::fs::File::options()
-            .append(true)
-            .create(true)
-            .open(&manifest_path)
-            .await?,
-    ));
+    // ==========================================
+    //  总体下载重试循环
+    //  当分片未集齐时，自动重新评估缺失分片并重试下载
+    // ==========================================
+    const MAX_OVERALL_RETRIES: usize = 5;
+    let mut overall_retries = 0;
+    let mut is_first_pass = true;
 
-    let semaphore = Arc::new(Semaphore::new(concurrency));
-    let mut handles = Vec::new();
+    loop {
+        // 存储真正需要下载的任务
+        let mut pending_downloads = Vec::new();
 
-    for (index, ts_url, filename, encryption) in pending_downloads {
-        let client = client.clone();
-        let semaphore = Arc::clone(&semaphore);
-        let cancelled = Arc::clone(&cancelled);
-        let metrics = Arc::clone(&metrics);
-        let manifest_writer = Arc::clone(&manifest_writer);
-        let headers = headers.clone();
-
-        handles.push(tokio::spawn(async move {
-            let _permit = semaphore.acquire().await?;
-
-            const MAX_RETRIES: usize = 15;
-            for attempt in 1..=MAX_RETRIES {
-                if cancelled.load(Ordering::Relaxed) {
-                    return Ok::<(), anyhow::Error>(());
+        // 加载清单文件，重新评估已完成的分片
+        let mut completed_segment_names = HashSet::new();
+        if let Ok(file) = tokio::fs::File::open(&manifest_path).await {
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+            while let Some(line) = lines.next_line().await? {
+                if !line.trim().is_empty() {
+                    completed_segment_names.insert(line);
                 }
-                let result = download_file(
-                    index, // 传入索引，用于 IV 降级处理
-                    &client,
-                    &ts_url,
-                    &filename,
-                    &cancelled,
-                    encryption.clone(),
-                    metrics.clone(),
-                    &headers,
-                )
-                .await;
+            }
+        }
+        log::info!(
+            "任务 [{}]: 从清单文件中加载了 {} 条已完成记录 (第 {} 轮)",
+            id,
+            completed_segment_names.len(),
+            overall_retries + 1
+        );
 
-                match result {
-                    Ok(DownloadResult::Success(f)) => {
-                        log::debug!("分片 [{}] 下载成功（尝试次数 {}）", f, attempt);
+        for (index, ts_url, filename, encryption) in &all_ts_segments {
+            let relative_name = match Path::new(&filename).file_name().and_then(|s| s.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
 
-                        if let Some(relative_name) =
-                            Path::new(&f).file_name().and_then(|s| s.to_str())
-                        {
-                            let mut writer = manifest_writer.lock().await;
-                            writer
-                                .write_all(format!("{}\n", relative_name).as_bytes())
-                                .await?;
-                            writer.flush().await?;
+            if completed_segment_names.contains(&relative_name) {
+                match tokio::fs::metadata(&filename).await {
+                    Ok(metadata) if metadata.len() > 0 => {
+                        // 仅首轮更新进度计数器，避免重试轮次重复计数
+                        if is_first_pass {
+                            let file_size = metadata.len() as usize;
+                            metrics.completed_chunks.fetch_add(1, Ordering::Relaxed);
+                            metrics
+                                .downloaded_bytes
+                                .fetch_add(file_size, Ordering::Relaxed);
+                            metrics.update_total_bytes(file_size);
                         }
-
-                        // 将已完成计数器 +1
-                        metrics.completed_chunks.fetch_add(1, Ordering::Relaxed);
-                        return Ok(());
                     }
-                    Ok(DownloadResult::Skipped(f)) => {
-                        log::warn!(
-                            "分片 [{}] 返回空数据（尝试 {}/{}），稍后重试",
-                            f,
-                            attempt,
-                            MAX_RETRIES
-                        );
-                        if attempt < MAX_RETRIES {
-                            // 空响应可能是网络波动，退避后重试
-                            let base_delay_secs = (1 << (attempt - 1)).min(10);
-                            let mut rng = SmallRng::from_entropy();
-                            let random_millis = rng.gen_range(0..1000);
-                            let total_delay = Duration::from_secs(base_delay_secs as u64)
-                                + Duration::from_millis(random_millis);
-                            log::info!("分片 [{}] 空数据退避，等待 {:?}", f, total_delay);
-                            tokio::time::sleep(total_delay).await;
-                        } else {
-                            log::error!("分片 [{}] 所有重试均返回空数据，放弃该分片", f);
-                            // 最终仍然为空，标记为 Skipped 不计入 completed_chunks
+                    _ => {
+                        // 清单有记录但文件丢失/为空 → 重新下载
+                        pending_downloads.push((
+                            *index,
+                            ts_url.clone(),
+                            filename.clone(),
+                            encryption.clone(),
+                        ));
+                    }
+                }
+            } else {
+                // 清单无记录 → 需要下载
+                pending_downloads.push((
+                    *index,
+                    ts_url.clone(),
+                    filename.clone(),
+                    encryption.clone(),
+                ));
+            }
+        }
+        is_first_pass = false;
+
+        log::info!(
+            "任务 [{}]: 总分片 {}, 清单已完成 {}, 本轮待下载 {} (第 {} 轮)",
+            id,
+            total_chunks,
+            completed_segment_names.len(),
+            pending_downloads.len(),
+            overall_retries + 1
+        );
+
+        // 如果本轮没有待下载分片，说明全部集齐，退出循环
+        if pending_downloads.is_empty() {
+            log::info!("任务 [{}] 所有分片均已就绪，准备合并", id);
+            break;
+        }
+
+        // --- 步骤 4: 启动下载任务 (只下载 pending_downloads) ---
+        // 创建一个线程安全的清单文件写入器
+        let manifest_writer = Arc::new(Mutex::new(
+            tokio::fs::File::options()
+                .append(true)
+                .create(true)
+                .open(&manifest_path)
+                .await?,
+        ));
+
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let mut handles = Vec::new();
+
+        for (index, ts_url, filename, encryption) in pending_downloads {
+            let client = client.clone();
+            let semaphore = Arc::clone(&semaphore);
+            let cancelled = Arc::clone(&cancelled);
+            let metrics = Arc::clone(&metrics);
+            let manifest_writer = Arc::clone(&manifest_writer);
+            let headers = headers.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = semaphore.acquire().await?;
+
+                const MAX_RETRIES: usize = 15;
+                for attempt in 1..=MAX_RETRIES {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    let result = download_file(
+                        index, // 传入索引，用于 IV 降级处理
+                        &client,
+                        &ts_url,
+                        &filename,
+                        &cancelled,
+                        encryption.clone(),
+                        metrics.clone(),
+                        &headers,
+                    )
+                    .await;
+
+                    match result {
+                        Ok(DownloadResult::Success(f)) => {
+                            log::debug!("分片 [{}] 下载成功（尝试次数 {}）", f, attempt);
+
+                            if let Some(relative_name) =
+                                Path::new(&f).file_name().and_then(|s| s.to_str())
+                            {
+                                let mut writer = manifest_writer.lock().await;
+                                writer
+                                    .write_all(format!("{}\n", relative_name).as_bytes())
+                                    .await?;
+                                writer.flush().await?;
+                            }
+
+                            // 将已完成计数器 +1
+                            metrics.completed_chunks.fetch_add(1, Ordering::Relaxed);
                             return Ok(());
                         }
-                    }
-                    Ok(DownloadResult::Cancelled(f)) => {
-                        log::debug!("分片 [{}] 因取消而中断", f);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        log::warn!("分片 [{}] 第 {} 次下载失败，原因：{}", filename, attempt, e);
-                        if attempt < MAX_RETRIES {
-                            // 指数退避和随机抖动
-                            let base_delay_secs = (1 << (attempt - 1)).min(10);
-
-                            let mut rng = SmallRng::from_entropy();
-                            let random_millis = rng.gen_range(0..1000);
-
-                            let total_delay = Duration::from_secs(base_delay_secs as u64)
-                                + Duration::from_millis(random_millis);
-
-                            log::info!("分片 [{}] 正在退避，等待 {:?}", filename, total_delay);
-                            tokio::time::sleep(total_delay).await;
-                        } else {
-                            log::error!("分片 [{}] 所有重试失败: {:?}, 尝试取消任务", filename, e);
-                            cancelled.store(true, Ordering::SeqCst); // 触发取消
+                        Ok(DownloadResult::Skipped(f)) => {
+                            log::warn!(
+                                "分片 [{}] 返回空数据（尝试 {}/{}），稍后重试",
+                                f,
+                                attempt,
+                                MAX_RETRIES
+                            );
+                            if attempt < MAX_RETRIES {
+                                // 空响应可能是网络波动，退避后重试
+                                let base_delay_secs = (1 << (attempt - 1)).min(10);
+                                let mut rng = SmallRng::from_entropy();
+                                let random_millis = rng.gen_range(0..1000);
+                                let total_delay = Duration::from_secs(base_delay_secs as u64)
+                                    + Duration::from_millis(random_millis);
+                                log::info!("分片 [{}] 空数据退避，等待 {:?}", f, total_delay);
+                                tokio::time::sleep(total_delay).await;
+                            } else {
+                                log::error!("分片 [{}] 所有重试均返回空数据，放弃该分片", f);
+                                // 最终仍然为空，标记为 Skipped 不计入 completed_chunks
+                                return Ok(());
+                            }
                         }
+                        Ok(DownloadResult::Cancelled(f)) => {
+                            log::debug!("分片 [{}] 因取消而中断", f);
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "分片 [{}] 第 {} 次下载失败，原因：{}",
+                                filename,
+                                attempt,
+                                e
+                            );
+                            if attempt < MAX_RETRIES {
+                                // 指数退避和随机抖动
+                                let base_delay_secs = (1 << (attempt - 1)).min(10);
+
+                                let mut rng = SmallRng::from_entropy();
+                                let random_millis = rng.gen_range(0..1000);
+
+                                let total_delay = Duration::from_secs(base_delay_secs as u64)
+                                    + Duration::from_millis(random_millis);
+
+                                log::info!("分片 [{}] 正在退避，等待 {:?}", filename, total_delay);
+                                tokio::time::sleep(total_delay).await;
+                            } else {
+                                log::error!(
+                                    "分片 [{}] 所有重试失败: {:?}, 将在下一轮重试",
+                                    filename,
+                                    e
+                                );
+                                // 不设置 cancelled，交由外层重试循环处理
+                            }
+                        }
+                    }
+                }
+                // 该分片本轮重试耗尽，返回 Ok 让外层循环决定是否重试
+                Ok(())
+            }));
+        }
+
+        // --- 步骤 5: 等待本轮所有下载任务完成 ---
+        // 不传播单个任务错误，由外层重试循环统一处理未完成的分片
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(())) => {} // 任务正常完成
+                Ok(Err(e)) => log::warn!("分片下载任务异常退出: {}", e),
+                Err(e) => log::error!("分片下载任务崩溃: {}", e),
+            }
+        }
+
+        // 从清单文件统计实际完成数（比依赖内存计数器更可靠）
+        let completed_count = {
+            let mut count = 0;
+            if let Ok(file) = tokio::fs::File::open(&manifest_path).await {
+                let reader = BufReader::new(file);
+                let mut lines = reader.lines();
+                while let Some(line) = lines.next_line().await? {
+                    if !line.trim().is_empty() {
+                        count += 1;
                     }
                 }
             }
-            // 返回 Err 表示该 task 最终失败
-            Err(anyhow::anyhow!(
-                "网络出现问题，所有下载尝试均失败，下载已被取消"
-            ))
-        }));
-    }
+            count
+        };
 
-    // --- 步骤 5: 等待所有下载任务完成 ---
-    for handle in handles {
-        handle.await??;
-    }
-
-    // 直接通过计数器检查完成度
-    let completed_count = metrics.completed_chunks.load(Ordering::Relaxed);
-
-    if completed_count != total_chunks {
+        // 用户主动取消 → 退出循环
         if cancelled.load(Ordering::Relaxed) {
-            // 用户主动取消
             log::info!(
                 "任务 [{}] 未完成下载。预期: {}, 已完成: {}. 任务已被取消",
                 id,
                 total_chunks,
                 completed_count
             );
-        } else {
-            // 下载失败
+            break;
+        }
+
+        // 所有分片已集齐 → 退出循环
+        if completed_count >= total_chunks {
+            log::info!("任务 [{}] 所有分片均已就绪，准备合并", id);
+            break;
+        }
+
+        // 未集齐 → 检查是否达到最大重试次数
+        overall_retries += 1;
+        if overall_retries >= MAX_OVERALL_RETRIES {
             log::error!(
-                "任务 [{}] 未能集齐所有分片。预期: {}, 实际: {}. 下载失败",
+                "任务 [{}] 经过 {} 轮尝试仍未能集齐所有分片。预期: {}, 实际: {}. 下载失败",
                 id,
+                MAX_OVERALL_RETRIES,
                 total_chunks,
                 completed_count
             );
-            // 强制取消
             cancelled.store(true, Ordering::SeqCst);
-            // 等待速度监控任务退出
-            speed_handle.await?;
-            return Err(anyhow::anyhow!(
-                "下载失败，部分分片缺失，可改小线程数后尝试继续下载"
-            ));
+            break;
         }
-    } else {
-        log::info!("任务 [{}] 所有分片均已就绪，准备合并", id);
-    }
+
+        log::warn!(
+            "任务 [{}] 第 {} 轮未能集齐所有分片 (已集齐 {}/{})，3秒后开始第 {} 轮重试...",
+            id,
+            overall_retries,
+            completed_count,
+            total_chunks,
+            overall_retries + 1
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    } // end of overall retry loop
 
     // 等待速度监控任务退出
     speed_handle.await?;
 
-    // 任务被取消
+    // 最终检查：如果被取消，返回 Ok（由上层处理）
     if cancelled.load(Ordering::Relaxed) {
         log::warn!("任务 [{}] 检测已被取消，结束下载", id);
         return Ok(());
