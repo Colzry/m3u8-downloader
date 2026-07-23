@@ -211,11 +211,9 @@ async fn download_file(
         }
         // 检测 JSON 错误响应（以 '{' 或 '[' 开头）
         if first_byte == b'{' || first_byte == b'[' {
-            let preview = String::from_utf8_lossy(&buffer[..buffer.len().min(200)]);
             log::warn!(
-                "[{}] 内容以 JSON 开头，疑似错误响应（预览: {}），视为网络错误以便重试",
-                url,
-                preview.chars().take(80).collect::<String>()
+                "[{}] 内容以 JSON 开头，疑似错误响应，视为网络错误以便重试",
+                url
             );
             return Err(anyhow!("服务器返回了 JSON 内容而非 TS 分片"));
         }
