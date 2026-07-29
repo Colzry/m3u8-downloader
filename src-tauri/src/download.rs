@@ -201,11 +201,9 @@ async fn download_file(
         let first_byte = buffer[0];
         // 检测 HTML 内容（以 '<' 开头，如 <html, <!DOCTYPE, <head 等）
         if first_byte == b'<' {
-            let preview = String::from_utf8_lossy(&buffer[..buffer.len().min(200)]);
             log::warn!(
-                "[{}] 内容以 '<' 开头，疑似 HTML 响应（预览: {}），视为网络错误以便重试",
-                url,
-                preview.chars().take(80).collect::<String>()
+                "[{}] 内容以 '<' 开头，疑似 HTML 响应，视为网络错误以便重试",
+                url
             );
             return Err(anyhow!("服务器返回了 HTML 内容而非 TS 分片"));
         }

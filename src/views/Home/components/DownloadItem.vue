@@ -49,6 +49,15 @@ const handleCheckboxChange = (checked) => {
     emit("select", props.id, checked);
 };
 
+// 强制合并（使用已下载的分片直接合并）
+const forceMerge = throttle(
+    async () => {
+        await downloadingStore.forceMerge(props.id);
+    },
+    3000,
+    { leading: true, trailing: false },
+);
+
 // 取消下载（保留临时目录）
 const cancelTask = throttle(
     async () => {
@@ -160,13 +169,24 @@ const deleteDownloaded = async () => {
                         @click="startTask"
                         >开始下载</span
                     >
-                    <!-- 已取消或已下载：显示继续下载 -->
+                    <!-- 已取消：显示继续下载和强制合并 -->
                     <span
                         class="opera-btn"
                         v-if="!isMerged && status === 0"
                         @click="continueTask"
                         >继续下载</span
                     >
+                    <n-popconfirm
+                        positive-text="确认"
+                        negative-text="取消"
+                        @positive-click="forceMerge"
+                        v-if="!isMerged && status === 0 && progress > 0"
+                    >
+                        <template #trigger>
+                            <span class="opera-btn">强制合并</span>
+                        </template>
+                        仅合并已下载的分片，缺失部分将跳过，是否继续？
+                    </n-popconfirm>
                     <!-- 等待中：显示取消等待 -->
                     <span
                         class="opera-btn"
@@ -174,13 +194,24 @@ const deleteDownloaded = async () => {
                         @click="cancelTask"
                         >取消等待</span
                     >
-                    <!-- 下载中：显示取消按钮 -->
+                    <!-- 下载中：显示取消按钮和强制合并 -->
                     <span
                         class="opera-btn"
                         v-if="!isMerged && status === 2"
                         @click="cancelTask"
                         >取消</span
                     >
+                    <n-popconfirm
+                        positive-text="确认"
+                        negative-text="取消"
+                        @positive-click="forceMerge"
+                        v-if="!isMerged && status === 2 && progress > 0"
+                    >
+                        <template #trigger>
+                            <span class="opera-btn">强制合并</span>
+                        </template>
+                        将取消下载并仅合并已下载的分片，是否继续？
+                    </n-popconfirm>
                     <!-- 合并完成：显示打开 -->
                     <span
                         class="opera-btn"
@@ -247,7 +278,7 @@ const deleteDownloaded = async () => {
             padding-bottom: 10px;
             justify-content: space-between;
             .title {
-                width: 80%;
+                width: 55%;
             }
             .operation-wrap:last-child {
                 margin-right: 20px;
@@ -255,13 +286,16 @@ const deleteDownloaded = async () => {
             .operation-wrap {
                 display: flex;
                 flex-direction: row;
+                flex-shrink: 0;
+                white-space: nowrap;
                 .opera-btn {
                     display: inline-block;
-                    font-size: 0.8rem;
+                    font-size: 0.75rem;
                     cursor: pointer;
-                    padding: 5px;
+                    padding: 5px 4px;
                     transition: color 0.4s;
                     color: #666;
+                    white-space: nowrap;
                     &:hover {
                         color: #1ba059;
                     }

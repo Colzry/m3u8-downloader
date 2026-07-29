@@ -39,10 +39,62 @@ export const useDownloadingStore = defineStore("Downloading", {
   },
 
   actions: {
+    // 强制合并：将所有已下载的分片合并为视频
+    async forceMerge(id) {
+      const item = this.getItemById(id);
+      if (!item) return;
+
+      const settingStore = useSettingStore();
+      try {
+        // 如果正在下载，先取消
+        if (item.status === 2) {
+          await invoke("cancel_download", { id });
+        }
+
+        // 设置一次性监听器接收 merge_video 事件
+        const downloadedStore = useDownloadedStore();
+        const unlisten = await listen("merge_video", (event) => {
+          const data = event.payload;
+          if (data.id === id && data.isMerged) {
+            // 发送通知 & 迁移数据到已下载列表
+            if (settingStore.enableNotification) {
+              const title = item?.title || "视频";
+              invoke("send_notification_cmd", {
+                title: "下载完成",
+                body: `${title} 已下载完成`,
+              }).catch((e) => console.error("发送通知失败:", e));
+            }
+            const found = this.items.find((i) => i.id === id);
+            if (found) {
+              Object.keys(data).forEach((key) => {
+                found[key] = data[key];
+              });
+              downloadedStore.addItem(found);
+              this.items = this.items.filter((i) => i.id !== id);
+              this.cleanupTaskListeners(id);
+              this.adjustCurrentPageAfterRemove();
+            }
+            unlisten(); // 移除本次监听
+          }
+        });
+
+        this.updateItem(id, { status: 4 }); // 标记为合并中
+
+        await invoke("force_merge", {
+          id,
+          name: item.title,
+          outputDir: settingStore.downloadPath,
+        });
+      } catch (e) {
+        console.error(`强制合并 ${id} 失败:`, e);
+        this.updateItem(id, { status: 10, message: String(e) });
+        throw e;
+      }
+    },
     // 在应用启动时调用，用于清理从持久化存储中加载的状态。
     init() {
       for (const item of this.items) {
-        // 1. 将所有"下载中"或"等待中"以及"合并中"的任务重置为"初始化或新添加"
+        // 将所有"下载中"或"等待中"以及"合并中"的任务重置为"初始化或新添加"
         // status 10 (初始化或新添加) 是重启后的标准"待命"状态
         if (item.status !== 10) {
           item.status = 10; // 10-初始化或新添加

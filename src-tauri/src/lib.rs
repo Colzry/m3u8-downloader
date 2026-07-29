@@ -1,6 +1,6 @@
 use crate::commands::{
-    cancel_download, check_update, delete_download, delete_file, get_cpu_info, save_settings,
-    save_store_file, send_notification_cmd, start_download,
+    cancel_download, check_update, delete_download, delete_file, force_merge, get_cpu_info,
+    save_settings, save_store_file, send_notification_cmd, start_download,
 };
 use crate::download_manager::DownloadManager;
 use tauri::{
@@ -102,6 +102,7 @@ pub fn run() {
             start_download,
             cancel_download,
             delete_download,
+            force_merge,
             get_cpu_info,
             delete_file,
             save_settings,

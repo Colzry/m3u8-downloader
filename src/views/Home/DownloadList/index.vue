@@ -23,8 +23,8 @@ const formData = reactive({
 const headerEntries = ref([{ key: "", value: "" }]);
 const userAgentOptions = [
     {
-        label: "Chrome(Win)",
-        value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+        label: "Chrome",
+        value: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
     },
     {
         label: "Firefox",
@@ -33,14 +33,6 @@ const userAgentOptions = [
     {
         label: "Safari",
         value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    },
-    {
-        label: "Chrome(Linux)",
-        value: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-    },
-    {
-        label: "Safari",
-        value: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
     },
     {
         label: "Edge",

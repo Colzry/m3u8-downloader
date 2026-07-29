@@ -1,5 +1,6 @@
 use crate::download::{download_m3u8, DownloadOptions};
 use crate::download_manager::{DownloadManager, DownloadTask};
+use crate::merge::merge_files;
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
@@ -9,6 +10,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_store::StoreExt;
 use tauri_plugin_updater::UpdaterExt;
+use tokio::io::AsyncBufReadExt;
 
 #[tauri::command]
 pub async fn start_download(
@@ -329,6 +331,77 @@ pub async fn check_update(app: tauri::AppHandle) -> Result<(), String> {
                 "message": "已经是最新版本"
             }),
         );
+    }
+
+    Ok(())
+}
+
+/// 强制合并：将已下载的分片直接合并为视频，忽略缺失分片
+#[tauri::command]
+pub async fn force_merge(
+    id: String,
+    name: String,
+    output_dir: String,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let temp_dir = format!("{}/temp_{}", output_dir, id);
+    let manifest_path = format!("{}/progress.dat", temp_dir);
+
+    // 读取清单文件中的已下载分片列表
+    let file = tokio::fs::File::open(&manifest_path)
+        .await
+        .map_err(|e| format!("无法打开清单文件: {}", e))?;
+
+    let reader = tokio::io::BufReader::new(file);
+    let mut lines = reader.lines();
+    let mut completed_names = Vec::new();
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| format!("读取清单失败: {}", e))?
+    {
+        let line = line.trim();
+        if !line.is_empty() {
+            completed_names.push(line.to_string());
+        }
+    }
+
+    if completed_names.is_empty() {
+        return Err("没有已下载的分片，无法合并".into());
+    }
+
+    // 按 part_N 中的数字 N 排序
+    completed_names.sort_by_cached_key(|name| {
+        name.strip_prefix("part_")
+            .and_then(|s| s.strip_suffix(".ts"))
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(0)
+    });
+
+    // 构建完整文件路径
+    let ts_files: Vec<String> = completed_names
+        .iter()
+        .map(|f| format!("{}/{}", temp_dir, f))
+        .collect();
+
+    log::info!("强制合并 [{}]: 共 {} 个分片可用", id, ts_files.len());
+
+    merge_files(
+        id.clone(),
+        &name,
+        ts_files,
+        &temp_dir,
+        &output_dir,
+        app_handle,
+    )
+    .await
+    .map_err(|e| format!("合并失败: {}", e))?;
+
+    // 合并成功后清理临时下载目录
+    match tokio::fs::remove_dir_all(&temp_dir).await {
+        Ok(()) => log::info!("强制合并 [{}]: 已清理临时目录 {}", id, temp_dir),
+        Err(e) => log::warn!("强制合并 [{}]: 清理临时目录失败 {}: {}", id, temp_dir, e),
     }
 
     Ok(())
