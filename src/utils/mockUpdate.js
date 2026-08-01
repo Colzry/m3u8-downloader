@@ -34,7 +34,8 @@ export function createMockUpdate() {
     body: MOCK_BODY,
     rawJson: {},
 
-    async downloadAndInstall(onEvent) {
+    // 模拟下载（仅下载，不安装）
+    async download(onEvent, _options) {
       aborted = false;
       const totalSize = 25 * 1024 * 1024; // 25MB
       let downloaded = 0;
@@ -52,14 +53,14 @@ export function createMockUpdate() {
 
       if (!aborted) {
         onEvent?.({ event: "Finished" });
+        // 返回模拟的 DownloadedUpdate 对象，包含 install 方法
+        return {
+          async install() {
+            console.log("[mock] 模拟安装更新");
+          },
+        };
       }
     },
-
-    async download(onEvent, _options) {
-      await this.downloadAndInstall(onEvent);
-    },
-
-    async install() {},
 
     async close() {
       aborted = true;

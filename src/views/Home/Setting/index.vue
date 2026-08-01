@@ -78,6 +78,10 @@ const updateModalStatus = ref("idle"); // "idle" | "checking" | "confirm" | "dow
 const currentUpdate = shallowRef(null);
 // 当前版本的发布信息（latest 状态下展示）
 const currentVersionInfo = ref(null);
+// 新版本的发布信息（confirm 状态下展示，从 GitHub API 拉取）
+const newVersionInfo = ref(null);
+// 已下载的更新对象（等用户确认后 install）
+const downloadedUpdate = shallowRef(null);
 // 用于取消下载
 const downloadCancelled = ref(false);
 // 用于取消检查更新
@@ -85,7 +89,7 @@ let checkAbortController = null;
 
 // Markdown 渲染
 const renderedConfirmBody = computed(() => {
-    const body = currentUpdate.value?.body;
+    const body = newVersionInfo.value?.body || currentUpdate.value?.body;
     return body ? marked.parse(body) : "";
 });
 const renderedLatestBody = computed(() => {
@@ -100,6 +104,8 @@ const onCheckUpdateClick = async (event) => {
     updateModalStatus.value = "checking";
     currentUpdate.value = null;
     currentVersionInfo.value = null;
+    newVersionInfo.value = null;
+    downloadedUpdate.value = null;
 
     // 创建新的 AbortController
     checkAbortController = new AbortController();
@@ -116,8 +122,11 @@ const onCheckUpdateClick = async (event) => {
         if (signal.aborted) return;
 
         if (update) {
-            // 发现更新，进入等待用户确认状态
+            // 发现更新，获取新版本的 GitHub 发布说明并进入等待用户确认状态
             currentUpdate.value = update;
+            newVersionInfo.value = await fetchReleaseInfo(update.version);
+            // 再次检查是否已取消
+            if (signal.aborted) return;
             updateModalStatus.value = "confirm";
         } else {
             // 没有更新，获取当前版本的发布信息
@@ -139,7 +148,7 @@ const cancelCheckUpdate = () => {
     updateModalVisible.value = false;
 };
 
-// 用户确认下载更新
+// 用户确认下载更新（仅下载，不安装，等待用户确认重启）
 const confirmUpdate = async () => {
     if (!currentUpdate.value) return;
 
@@ -147,12 +156,12 @@ const confirmUpdate = async () => {
     updateModalStatus.value = "downloading";
     updateProgress.value = 0;
 
-    let downloaded = 0;
+    let downloadedBytes = 0;
     let contentLength = 0;
 
     try {
-        // 执行下载并安装，监听进度
-        await currentUpdate.value.downloadAndInstall((event) => {
+        // 只下载，不安装，避免下载完自动重启
+        const downloaded = await currentUpdate.value.download((event) => {
             // 每个进度回调都检查是否已取消
             if (downloadCancelled.value) return;
 
@@ -161,10 +170,10 @@ const confirmUpdate = async () => {
                     contentLength = event.data.contentLength;
                     break;
                 case "Progress":
-                    downloaded += event.data.chunkLength;
+                    downloadedBytes += event.data.chunkLength;
                     if (contentLength > 0) {
                         updateProgress.value = Math.round(
-                            (downloaded / contentLength) * 100,
+                            (downloadedBytes / contentLength) * 100,
                         );
                     }
                     break;
@@ -177,7 +186,8 @@ const confirmUpdate = async () => {
         // 如果已被取消，不进入 ready 状态
         if (downloadCancelled.value) return;
 
-        // 下载安装完成，等待用户决定是否重启
+        // 保存已下载的更新，等待用户决定是否重启
+        downloadedUpdate.value = downloaded;
         updateModalStatus.value = "ready";
     } catch (e) {
         // 如果是用户主动取消，不显示错误
@@ -199,8 +209,15 @@ const cancelUpdateDownload = async () => {
     updateModalVisible.value = false;
 };
 
-// 用户选择立即重启
+// 用户选择立即重启（先安装再重启）
 const restartApp = async () => {
+    try {
+        if (downloadedUpdate.value) {
+            await downloadedUpdate.value.install();
+        }
+    } catch (e) {
+        console.error("安装更新失败:", e);
+    }
     await relaunch();
 };
 </script>
@@ -440,11 +457,14 @@ const restartApp = async () => {
                             v{{ currentUpdate.version }}
                         </div>
                     </div>
-                    <div v-if="currentUpdate.date" class="update-date">
-                        发布于 {{ currentUpdate.date }}
+                    <div
+                        v-if="newVersionInfo?.date || currentUpdate.date"
+                        class="update-date"
+                    >
+                        发布于 {{ newVersionInfo?.date || currentUpdate.date }}
                     </div>
                     <div
-                        v-if="currentUpdate.body"
+                        v-if="newVersionInfo?.body || currentUpdate.body"
                         class="release-body"
                         v-html="renderedConfirmBody"
                     ></div>
@@ -453,9 +473,6 @@ const restartApp = async () => {
                             >稍后再说</n-button
                         >
                         <n-button type="primary" @click="confirmUpdate">
-                            <template #icon>
-                                <n-icon><DownloadOutline /></n-icon>
-                            </template>
                             立即更新
                         </n-button>
                     </div>
@@ -524,9 +541,6 @@ const restartApp = async () => {
                             >稍后重启</n-button
                         >
                         <n-button type="primary" @click="restartApp">
-                            <template #icon>
-                                <n-icon><RefreshOutline /></n-icon>
-                            </template>
                             立即重启
                         </n-button>
                     </div>
