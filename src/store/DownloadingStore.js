@@ -133,6 +133,31 @@ export const useDownloadingStore = defineStore("Downloading", {
       this.updatePaginationTotal();
     },
 
+    // 通过 m3u8dl:// 深链添加并立即开始下载
+    addDeepLinkDownload({ url, name }) {
+      if (!url) return null;
+
+      const settingStore = useSettingStore();
+      const id = crypto.randomUUID();
+
+      this.addItem({
+        id,
+        title: (name || "").trim() || "未命名视频",
+        progress: 0,
+        status: 10, // 10-初始化或新添加
+        url: url.trim(),
+        downloadPath: settingStore.downloadPath,
+        headers: {
+          // 深链场景无法交互填写请求头，默认带上常见 User-Agent
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+        },
+      });
+
+      this.startDownload(id);
+      return id;
+    },
+
     // 通过 ID 获取下载项
     getItemById(id) {
       return this.items.find((item) => item.id === id) || null;

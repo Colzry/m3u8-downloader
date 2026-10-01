@@ -66,8 +66,10 @@ const rules = {
 
 import { useDownloadingStore } from "@/store/DownloadingStore";
 import { useSettingStore } from "@/store/SettingStore.js";
+import { useUIStore } from "@/store/UIStore.js";
 const downloadingStore = useDownloadingStore();
 const settingStore = useSettingStore();
+const UIStore = useUIStore();
 
 // 初始化一些数据
 // for (let id = 1; id < 15; id++) {
@@ -148,15 +150,43 @@ const handleDownloadSelected = async () => {
 // 切换下载模式：单个下载 / 批量下载
 const downloadMode = ref("single");
 
-// 创建下载
-const clickNewDownload = () => {
+// 打开「新建下载」弹窗（可传入深链预填数据）
+const openNewDownloadModal = (prefill = null) => {
     downloadMode.value = "single";
     Object.keys(formData).forEach((key) => {
         delete formData[key];
     });
     formData.downloadPath = settingStore.downloadPath;
-    showModal.value = true;
     resetHeaders(); // 统一重置headers
+    if (prefill) {
+        formData.videoUrl = prefill.url || "";
+        formData.videoName = prefill.name || "";
+    }
+    showModal.value = true;
+};
+
+// 消费深链队列：预填「新建下载」界面，等待用户手动确认后再下载
+const consumeDeepLinkQueue = () => {
+    // 弹窗已打开时先等待其关闭，避免覆盖用户正在编辑的内容
+    if (showModal.value) return;
+    const pending = UIStore.shiftDeepLink();
+    if (!pending) return;
+    openNewDownloadModal({ url: pending.url, name: pending.name });
+};
+
+// 深链队列变化时（含组件挂载）尝试消费
+watch(() => UIStore.deepLinkQueue.length, consumeDeepLinkQueue, {
+    immediate: true,
+});
+
+// 弹窗关闭后，若队列中还有深链任务则继续弹出确认
+watch(showModal, (visible) => {
+    if (!visible) consumeDeepLinkQueue();
+});
+
+// 创建下载
+const clickNewDownload = () => {
+    openNewDownloadModal();
 };
 
 // 取消创建下载

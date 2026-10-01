@@ -37,7 +37,8 @@ tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-http = "2"
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
 tauri-plugin-updater = "2"
 rand = { version = "0.8", features = ["small_rng", "std"] }
 aes = "0.8"

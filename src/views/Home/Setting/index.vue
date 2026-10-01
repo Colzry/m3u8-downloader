@@ -318,6 +318,31 @@ const restartApp = async () => {
                         />
                     </div>
                 </div>
+                <div class="set-item">
+                    <div class="set-label">
+                        <div>深链自动下载</div>
+                    </div>
+                    <div class="set-value">
+                        <n-switch
+                            size="small"
+                            v-model:value="settingStore.deepLinkAutoDownload"
+                        />
+                        <n-tooltip trigger="hover">
+                            <template #trigger>
+                                <n-icon
+                                    size="1.2rem"
+                                    style="cursor: pointer; margin-left: 5px"
+                                >
+                                    <HelpCircleOutline />
+                                </n-icon>
+                            </template>
+                            <span
+                                >关闭时，打开 m3u8dl://
+                                链接会弹出新建下载界面供确认</span
+                            >
+                        </n-tooltip>
+                    </div>
+                </div>
             </div>
         </div>
 

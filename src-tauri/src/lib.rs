@@ -8,9 +8,11 @@ use tauri::{
     tray::{MouseButton, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_store::StoreExt;
 
 pub mod commands;
+mod deep_link;
 mod download;
 mod download_manager;
 mod download_monitor;
@@ -32,20 +34,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // 多次启动聚焦主窗口
+            // 第二次启动（含由深链唤起的进程）将主窗口恢复并置顶。
+            // 深链 URL 已由 deep-link 插件通过 on_open_url 转发给当前实例。
             if let Some(window) = get_or_create_main_window(app) {
-                if let Ok(true) = window.is_minimized() {
-                    let _ = window.unminimize();
-                }
-                if let Ok(false) = window.is_visible() {
-                    let _ = window.show();
-                }
-                let _ = window.set_focus();
+                deep_link::bring_to_front(&window);
             }
         }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(DownloadManager::new()) // 注册下载全局状态管理
+        .manage(deep_link::DeepLinkQueue::default()) // 注册 m3u8dl:// 深链队列
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -58,6 +57,11 @@ pub fn run() {
 
             // 初始化托盘
             enable_tray(app)?;
+
+            // ==========================================
+            // m3u8dl:// 深链：冷启动读取 + 运行中监听
+            // ==========================================
+            setup_deep_link(app);
 
             // ==========================================
             // 为初始主窗口绑定关闭拦截逻辑
@@ -109,6 +113,7 @@ pub fn run() {
             check_update,
             save_store_file,
             send_notification_cmd,
+            deep_link::drain_pending_deep_links,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
@@ -135,6 +140,54 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// 初始化 m3u8dl:// 深链处理
+///
+/// 1. 冷启动：读取启动参数中的深链并入队，等待前端挂载后拉取；
+/// 2. 运行中：监听单实例插件转发过来的深链，入队并通知前端，同时将窗口置顶。
+fn setup_deep_link(app: &mut tauri::App) {
+    // 1) 冷启动：先把启动参数中的深链放入队列，避免前端尚未就绪时丢失
+    let mut pending = Vec::new();
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        pending.extend(urls.iter().filter_map(|u| deep_link::parse(u.as_str())));
+    }
+    if !pending.is_empty() {
+        if let Some(state) = app.try_state::<deep_link::DeepLinkQueue>() {
+            state.push_all(pending);
+        }
+    }
+
+    // 2) 运行中：接收新的深链事件
+    let handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        let items: Vec<deep_link::DeepLinkPayload> = event
+            .urls()
+            .iter()
+            .filter_map(|u| deep_link::parse(u.as_str()))
+            .collect();
+
+        if items.is_empty() {
+            return;
+        }
+
+        if let Some(state) = handle.try_state::<deep_link::DeepLinkQueue>() {
+            state.push_all(items);
+        }
+        let _ = handle.emit("deep_link_download", ());
+
+        if let Some(window) = get_or_create_main_window(&handle) {
+            deep_link::bring_to_front(&window);
+        }
+    });
+
+    // 3) 开发模式（Windows）与 Linux/AppImage：运行时注册协议，便于本地调试
+    #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+    {
+        if let Err(e) = app.deep_link().register_all() {
+            log::warn!("注册 m3u8dl:// 协议失败: {}", e);
+        }
+    }
 }
 
 /// 恢复窗口显示

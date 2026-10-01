@@ -82,6 +82,45 @@ listen("open_settings", () => {
     router.push({ name: "Setting" });
 });
 
+// ==========================================
+// m3u8dl:// 深链下载处理
+// ==========================================
+// 后端将深链解析结果入队并通过事件通知，这里拉取队列并加入下载列表。
+// 事件与“挂载时拉取”双通道，保证冷启动/运行中唤起都不会漏掉任务。
+const processDeepLinkQueue = async () => {
+    try {
+        const items = await invoke("drain_pending_deep_links");
+        if (!Array.isArray(items) || items.length === 0) return;
+
+        for (const item of items) {
+            if (settingStore.deepLinkAutoDownload) {
+                // 设置开启：直接加入列表并开始下载
+                downloadingStore.addDeepLinkDownload(item);
+            } else {
+                // 默认：交给下载列表弹出「新建下载」界面，由用户确认后再下载
+                UIStore.pushDeepLink(item);
+            }
+        }
+
+        router.push({ name: "DownloadList" });
+    } catch (e) {
+        console.error("处理深链下载失败:", e);
+    }
+};
+
+let unlistenDeepLink = null;
+onMounted(async () => {
+    unlistenDeepLink = await listen("deep_link_download", () => {
+        processDeepLinkQueue();
+    });
+    // 冷启动场景：应用启动时即携带深链
+    processDeepLinkQueue();
+});
+
+onUnmounted(() => {
+    unlistenDeepLink?.();
+});
+
 // 路由映射表：路由名称 -> URL hash
 const routeHashMap = {
     DownloadList: "dList",

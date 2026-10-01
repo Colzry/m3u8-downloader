@@ -8,6 +8,7 @@ export const useSettingStore = defineStore("Setting", {
     physicalCores: 1, // 物理核心数
     logicalCores: 4, // 逻辑核心数
     isDeleteDownloadFile: false, // 是否删除下载原文件
+    deepLinkAutoDownload: false, // 深链（m3u8dl://）是否直接开始下载，false 时弹出新建下载界面确认
     enableNotification: true, // 下载完成是否弹出系统通知
     minimizeOnClose: true, // false 退出程序  true 最小化
     logLevel: "Info", // 日志级别
