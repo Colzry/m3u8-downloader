@@ -1,0 +1,34 @@
+name: Update and Deploy to AUR
+
+on:
+  release:
+    types: [published] # 当你在 GitHub 发布 Release 时触发
+  workflow_dispatch:   # 允许手动在网页端点击触发测试
+
+jobs:
+  aur-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prepare PKGBUILD with new release version
+        run: |
+          # 1. 从 GitHub Release tag 中提取版本号（去掉前面的 'v'，如 v1.2.0 -> 1.2.0）
+          RAW_TAG="${{ github.ref_name }}"
+          PKGVER="${RAW_TAG#v}"
+
+          # 2. 替换 PKGBUILD 中的 pkgver，并将 pkgrel 重置为 1
+          sed -i "s/^pkgver=.*/pkgver=${PKGVER}/" PKGBUILD
+          sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3
+        with:
+          pkgname: m3u8-downloader-colzry-bin           # 替换为你的 AUR 包名
+          pkgbuild: ./PKGBUILD                     # 指向修改后的 PKGBUILD 路径
+          commit_username: 'github-actions[bot]'
+          commit_email: 'github-actions[bot]@users.noreply.github.com'
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to ${{ github.ref_name }}"
+          updpkgsums: true                         # 关键：Action 会在 Arch 容器中自动执行 updpkgsums 更新校验和
