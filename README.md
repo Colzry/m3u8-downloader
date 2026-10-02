@@ -34,7 +34,7 @@ m3u8测试下载地址：https://sf1-cdn-tos.huoshanstatic.com/obj/media-fe/xgpl
 
 ## 深链协议（m3u8dl://）
 
-安装后应用会注册 `m3u8dl://` 自定义协议，凡以该前缀开头的链接都会由本工具接管打开，可用于从脚本/浏览器一键唤起下载。
+安装后应用会注册 `m3u8dl://` 自定义协议，凡以该前缀开头的链接都会由本工具接管打开，可用于从脚本/浏览器一键唤起下载，适配脚本[点击下载](https://greasyfork.org/zh-CN/scripts/575847)。
 
 **协议格式**（`url` 与 `name` 均需 URL 编码）：
 
